@@ -3,17 +3,29 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
+
+# Modifications by Svebor Karaman (svebor.karaman@columbia.edu)
+# - save model and data
+
+
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import unicode_literals
 from __future__ import division
 import numpy as np
-import scipy.io
+#import scipy.io
+import scipy
+from scipy import io as sio
 from sklearn.preprocessing import OneHotEncoder
+# should now use: sklearn.model_selection.StratifiedShuffleSplit
 from sklearn.cross_validation import StratifiedShuffleSplit
 from sklearn.linear_model import LogisticRegression
 import argparse
-import faiss
+#import faiss
+# Copied files faiss.py _swigfaiss.so swigfaiss.py in a directory pyfaiss/. 
+# Add a __init__.py in that directory. 
+# And add that directory to the PYTHONPATH
+from pyfaiss import faiss
 from os.path import join
 
 
@@ -93,6 +105,7 @@ def getmAP(clf, X_base, y_base, X_query, y_query, id_label, y_label):
     index.add(activations.astype(np.float32))
 
     queryAct = clf.predict_proba(X_query).astype(np.float32)
+    # Why queryAct is not encoded?
 
     _, idc = index.search(queryAct, y_base.shape[0])
     predictions = y_base[idc]
@@ -108,7 +121,11 @@ parser.add_argument('--labels', type=int, default=1000)
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--nbits', type=int)
 parser.add_argument('--path', type=str, default="features")
+parser.add_argument('--savemodel', default=False, dest='savemodel', action='store_true')
+parser.add_argument('--savedata', default=False, dest='savedata', action='store_true')
 args = parser.parse_args()
+
+#print(args)
 
 assert (args.code != "lsh" or args.nbits is not None)
 np.random.seed(args.seed)
@@ -117,15 +134,32 @@ cifargist = np.load(join(args.path, "cifar10_gist.npy"))
 cifarlabels = np.load(join(args.path, "cifar10_label.npy"))
 
 X_train, y_train, X_test, y_test = balancedSplit(cifargist, cifarlabels, test_sz=1000, seed=args.seed)
-nvalid = args.labels / 10
+nvalid = int(args.labels / 10)
 
 # Use 10% of labelled data for validation
 id_label = getBalancedSample(y_train, seed=args.seed, test_sz=args.labels)
+# nvalid was a float?
+#print((nvalid,id_label))
 id_label_valid = id_label[-nvalid:]
 id_label_train = id_label[:-nvalid]
 
+
 anchors = X_train[id_label[np.random.choice(args.labels, args.anchors, False)]]
 sigma = getSigma(X_train, anchors)
+
+# What data do we need to save?
+# Should we save after embedding?
+if args.savedata:
+    # build out data name from label, anchor and seed.
+    data_fn = "data_{}train_{}anchors_run{}.mat".format(args.labels, args.anchors, args.seed)
+    # save clf.coef_ and clf.intercept_ ?
+    sio.savemat(data_fn, {"X_train": X_train, "y_train": y_train,
+                          "X_test": X_test, "y_test": y_test,
+                          "X_label": X_train[id_label], "y_label": y_train[id_label],
+                          "anchors": anchors, "sigma": sigma,
+                          "id_label": id_label, "id_label_valid": id_label_valid, "id_label_train": id_label_train})
+
+
 X_train = computeRBF(X_train, anchors, sigma)
 X_test = computeRBF(X_test, anchors, sigma)
 
@@ -136,6 +170,7 @@ mask_valid = np.array([(i in id_label_valid) for i in range(len(X_train))], dtyp
 id_label_train_in_novalid = np.zeros((X_train.shape[0]))
 id_label_train_in_novalid[~mask_valid] = np.arange(np.sum(~mask_valid))
 id_label_train_in_novalid = id_label_train_in_novalid[id_label_train].astype(int)
+
 
 # Cross valid regularization parameter
 best_C, best_score = None, 0
@@ -159,6 +194,14 @@ for C in [2**k for k in range(-5, 13)]:
 
 clf = LogisticRegression(C=best_C, random_state=args.seed, n_jobs=1)
 clf.fit(X_label, y_label)
+
+#print(clf)
+
+if args.savemodel:
+    # build out model name from label, anchor and seed.
+    mdl_fn = "lrmodel_{}train_{}anchors_run{}.mat".format(args.labels, args.anchors, args.seed)
+    # save clf.coef_ and clf.intercept_ ?
+    sio.savemat(mdl_fn, {"coef": clf.coef_, "intercept": clf.intercept_, "C": best_C})
 
 mAP = getmAP(clf,
              X_train,
